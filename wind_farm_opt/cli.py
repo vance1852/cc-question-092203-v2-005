@@ -36,6 +36,7 @@ from .visualization.plotting import (
     plot_comparison,
     plot_wake_heatmap,
 )
+from .units import EnergyUnit
 
 
 class WindFarmOptimizerCLI:
@@ -243,6 +244,13 @@ class WindFarmOptimizerCLI:
 
         rng = np.random.default_rng(self.config.optimization.seed)
         original_n = self.config.n_turbines
+        # 扫描会重建风机列表与 AEP 计算器，先保存以便结束后恢复，
+        # 否则同一次运行后续绘图用到的 rotor_diameters 等仍停留在
+        # 最后一个扫描台数上，与基线/优化机位数量不匹配。
+        original_turbines = self.turbines
+        original_rotor_diameters = self.rotor_diameters
+        original_rated_powers = self.rated_powers
+        original_aep_calc = self.aep_calc
 
         turbine_cost = get_default_turbine_cost(self.config.turbine_model)
         farm_cost = get_default_farm_cost()
@@ -252,48 +260,53 @@ class WindFarmOptimizerCLI:
             electricity_price=self.config.economic.electricity_price,
         )
 
-        for n in range(min_turbines, max_turbines + 1, step):
-            print(f"\n  分析 {n} 台风机...")
-            self.config.n_turbines = n
-            self.turbines = [self.turbines[0] for _ in range(n)]
-            self.rotor_diameters = np.array([t.rotor_diameter for t in self.turbines])
-            self.rated_powers = np.array([t.rated_power for t in self.turbines])
+        try:
+            for n in range(min_turbines, max_turbines + 1, step):
+                print(f"\n  分析 {n} 台风机...")
+                self.config.n_turbines = n
+                self.turbines = [original_turbines[0] for _ in range(n)]
+                self.rotor_diameters = np.array([t.rotor_diameter for t in self.turbines])
+                self.rated_powers = np.array([t.rated_power for t in self.turbines])
 
-            self.aep_calc = AEPCalculator(
-                turbines=self.turbines,
-                wind_resource=self.wind_resource,
-                wake_model=self.wake_model,
-                wake_superposition=self.config.superposition_method,
-            )
-
-            try:
-                positions = generate_grid_layout(
-                    boundary=self.boundary,
-                    n_turbines=n,
-                    rotor_diameters=self.rotor_diameters,
-                    min_multiple=self.config.optimization.min_spacing_multiple,
-                    rng=rng,
+                self.aep_calc = AEPCalculator(
+                    turbines=self.turbines,
+                    wind_resource=self.wind_resource,
+                    wake_model=self.wake_model,
+                    wake_superposition=self.config.superposition_method,
                 )
 
-                result = self.aep_calc.compute_farm_aep(positions)
+                try:
+                    positions = generate_grid_layout(
+                        boundary=self.boundary,
+                        n_turbines=n,
+                        rotor_diameters=self.rotor_diameters,
+                        min_multiple=self.config.optimization.min_spacing_multiple,
+                        rng=rng,
+                    )
 
-                rated_power_MW = self.turbines[0].rated_power / 1e3
-                econ_result = analyzer.analyze(
-                    n_turbines=n,
-                    rated_power_per_turbine_MW=rated_power_MW,
-                    net_aep_GWh=result.net_aep / 1e3,
-                )
+                    result = self.aep_calc.compute_farm_aep(positions)
 
-                sweep_data["n_turbines"].append(n)
-                sweep_data["aep"].append(result.net_aep)
-                sweep_data["lcoe"].append(econ_result.lcoe)
+                    rated_power_MW = self.turbines[0].rated_power / 1e3
+                    econ_result = analyzer.analyze(
+                        n_turbines=n,
+                        rated_power_per_turbine_MW=rated_power_MW,
+                        net_aep_GWh=result.net_aep / 1e3,
+                    )
 
-                print(f"    净AEP: {result.net_aep/1e3:.1f} GWh, LCOE: {econ_result.lcoe:.3f} 元/kWh")
-            except Exception as e:
-                print(f"    跳过: {e}")
+                    sweep_data["n_turbines"].append(n)
+                    sweep_data["aep"].append(result.net_aep)
+                    sweep_data["lcoe"].append(econ_result.lcoe)
 
-        self.sweep_results = sweep_data
-        self.config.n_turbines = original_n
+                    print(f"    净AEP: {result.net_aep/1e3:.1f} GWh, LCOE: {econ_result.lcoe:.3f} 元/kWh")
+                except Exception as e:
+                    print(f"    跳过: {e}")
+        finally:
+            self.sweep_results = sweep_data
+            self.config.n_turbines = original_n
+            self.turbines = original_turbines
+            self.rotor_diameters = original_rotor_diameters
+            self.rated_powers = original_rated_powers
+            self.aep_calc = original_aep_calc
 
     def run_visualization(self) -> None:
         """生成所有可视化图表。"""
@@ -356,7 +369,9 @@ class WindFarmOptimizerCLI:
         if self.optimize_result is not None and self.baseline_result is not None:
             plot_convergence(
                 optimize_result=self.optimize_result,
+                # baseline_result.net_aep 与 OptimizeResult 历史值均为 MWh/year
                 baseline_aep=self.baseline_result.net_aep,
+                aep_unit=EnergyUnit.MWH,
                 title="优化收敛曲线",
                 save_path=os.path.join(save_dir, "convergence.png") if save else None,
                 show=show,
@@ -374,8 +389,10 @@ class WindFarmOptimizerCLI:
         if self.sweep_results is not None:
             plot_aep_vs_turbines(
                 n_turbines_list=self.sweep_results["n_turbines"],
+                # sweep_results["aep"] 为 MWh/year，与 JSON 的 aep_mwh 一致
                 aep_list=self.sweep_results["aep"],
                 lcoe_list=self.sweep_results["lcoe"],
+                aep_unit=EnergyUnit.MWH,
                 title="风机台数优化分析",
                 save_path=os.path.join(save_dir, "aep_vs_turbines.png") if save else None,
                 show=show,

@@ -18,6 +18,7 @@ from ..constraints.boundary import SiteBoundary
 from ..core.wind_resource import WindResource
 from ..farm.aep import FarmResult
 from ..optimization.ga import OptimizeResult
+from ..units import EnergyUnit, EnergyUnitLike, mwh_to_gwh, to_mwh
 
 
 def set_chinese_font() -> None:
@@ -253,21 +254,27 @@ def plot_convergence(
     title: str = "优化收敛曲线",
     save_path: Optional[str] = None,
     show: bool = False,
+    aep_unit: EnergyUnitLike = EnergyUnit.MWH,
 ) -> None:
     """绘制优化收敛曲线。
 
     Parameters
     ----------
     optimize_result : OptimizeResult
-        优化结果
+        优化结果。``convergence_history``、``mean_history`` 和
+        ``best_fitness`` 的单位由 ``aep_unit`` 声明；``OptimizeResult``
+        的内部契约单位为 MWh/year。
     baseline_aep : Optional[float]
-        基线布局AEP（用于对比）(MWh)
+        基线布局AEP（用于对比），单位与 ``aep_unit`` 一致。
     title : str
         图表标题
     save_path : Optional[str]
         保存路径
     show : bool
         是否显示图表
+    aep_unit : EnergyUnitLike
+        ``optimize_result`` 历史值与 ``baseline_aep`` 的输入单位，
+        默认 ``"MWh"``（库内部契约单位）。图中统一以 GWh 显示。
     """
     set_chinese_font()
 
@@ -275,8 +282,14 @@ def plot_convergence(
 
     generations = np.arange(1, len(optimize_result.convergence_history) + 1)
 
-    best_history = np.array(optimize_result.convergence_history) / 1e3
-    mean_history = np.array(optimize_result.mean_history) / 1e3
+    # 输入可能是 kWh/MWh/GWh，先统一归一化到内部单位 MWh，再换算成 GWh 显示，
+    # 避免在调用方重复乘除 1e3 造成数量级漂移。
+    best_history_mwh = to_mwh(np.array(optimize_result.convergence_history), aep_unit)
+    mean_history_mwh = to_mwh(np.array(optimize_result.mean_history), aep_unit)
+    best_fitness_mwh = to_mwh(optimize_result.best_fitness, aep_unit)
+
+    best_history = mwh_to_gwh(best_history_mwh)
+    mean_history = mwh_to_gwh(mean_history_mwh)
 
     ax.plot(
         generations,
@@ -294,18 +307,21 @@ def plot_convergence(
         label="种群平均",
     )
 
+    baseline_aep_gwh = None
     if baseline_aep is not None:
+        baseline_aep_mwh = to_mwh(baseline_aep, aep_unit)
+        baseline_aep_gwh = mwh_to_gwh(baseline_aep_mwh)
         ax.axhline(
-            y=baseline_aep / 1e3,
+            y=baseline_aep_gwh,
             color="r",
             linestyle=":",
             linewidth=2,
-            label=f"网格布局基线: {baseline_aep/1e3:.2f} GWh",
+            label=f"网格布局基线: {baseline_aep_gwh:.2f} GWh",
         )
 
     improvement = 0.0
-    if baseline_aep is not None and baseline_aep > 0:
-        improvement = (optimize_result.best_fitness - baseline_aep) / baseline_aep * 100
+    if baseline_aep is not None and baseline_aep_mwh > 0:
+        improvement = (best_fitness_mwh - baseline_aep_mwh) / baseline_aep_mwh * 100
 
     ax.set_xlabel("迭代代数")
     ax.set_ylabel("净年发电量 (GWh)")
@@ -314,7 +330,7 @@ def plot_convergence(
     ax.legend(loc="lower right")
 
     info_text = (
-        f"最优解: {optimize_result.best_fitness/1e3:.2f} GWh\n"
+        f"最优解: {mwh_to_gwh(best_fitness_mwh):.2f} GWh\n"
         f"找到代数: {optimize_result.best_generation}"
     )
     if improvement > 0:
@@ -348,6 +364,7 @@ def plot_aep_vs_turbines(
     title: str = "发电量/度电成本 vs 风机台数",
     save_path: Optional[str] = None,
     show: bool = False,
+    aep_unit: EnergyUnitLike = EnergyUnit.MWH,
 ) -> None:
     """绘制发电量随风机台数变化的曲线。
 
@@ -356,7 +373,8 @@ def plot_aep_vs_turbines(
     n_turbines_list : list[int]
         风机台数列表
     aep_list : list[float]
-        对应净AEP列表 (MWh/year)
+        对应净AEP列表，单位由 ``aep_unit`` 声明（默认 MWh/year，
+        即台数扫描内部与 JSON ``aep_mwh`` 字段的单位）。
     lcoe_list : Optional[list[float]]
         对应LCOE列表 (元/kWh)
     title : str
@@ -365,6 +383,8 @@ def plot_aep_vs_turbines(
         保存路径
     show : bool
         是否显示图表
+    aep_unit : EnergyUnitLike
+        ``aep_list`` 的输入单位，默认 ``"MWh"``。图中统一以 GWh 显示。
     """
     set_chinese_font()
 
@@ -374,7 +394,7 @@ def plot_aep_vs_turbines(
         fig, ax1 = plt.subplots(figsize=(10, 6))
 
     n_turbines = np.array(n_turbines_list)
-    aep_gwh = np.array(aep_list) / 1e3
+    aep_gwh = mwh_to_gwh(to_mwh(np.array(aep_list), aep_unit))
 
     ax1.plot(n_turbines, aep_gwh, "bo-", linewidth=2, markersize=8, label="净AEP")
     ax1.set_ylabel("净年发电量 (GWh)")
@@ -526,17 +546,21 @@ def plot_comparison(
     fig, axes = plt.subplots(2, 2, figsize=(12, 10))
 
     metrics = ["净AEP", "尾流损失", "容量系数", "单机平均AEP"]
+    n_baseline = max(1, len(baseline_result.turbine_results))
+    n_optimized = max(1, len(optimized_result.turbine_results))
+    # FarmResult 的能量字段契约单位为 MWh/year，图上以 GWh 显示，
+    # 必须先除以 1000，否则标签(GWh)与数值(MWh)相差三个数量级。
     baseline_vals = [
-        baseline_result.net_aep,
+        mwh_to_gwh(baseline_result.net_aep),
         baseline_result.wake_loss_pct,
         baseline_result.capacity_factor,
-        baseline_result.net_aep / len(baseline_result.turbine_results),
+        mwh_to_gwh(baseline_result.net_aep / n_baseline),
     ]
     optimized_vals = [
-        optimized_result.net_aep,
+        mwh_to_gwh(optimized_result.net_aep),
         optimized_result.wake_loss_pct,
         optimized_result.capacity_factor,
-        optimized_result.net_aep / len(optimized_result.turbine_results),
+        mwh_to_gwh(optimized_result.net_aep / n_optimized),
     ]
     units = ["GWh", "%", "%", "GWh/台"]
 

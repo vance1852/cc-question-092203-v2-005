@@ -188,7 +188,10 @@ print("   ✓ 布局图已生成")
 
 plot_convergence(
     opt_result,
-    baseline_aep=result.net_aep * 1e3,
+    # FarmResult.net_aep 与 OptimizeResult 历史值均为 MWh/year，直接传入，
+    # 绘图函数内部统一换算 GWh，不再由调用方乘 1000。
+    baseline_aep=result.net_aep,
+    aep_unit="MWh",
     save_path="test_output/convergence.png",
     show=False,
 )
