@@ -188,7 +188,9 @@ print("   ✓ 布局图已生成")
 
 plot_convergence(
     opt_result,
-    baseline_aep=result.net_aep * 1e3,
+    # result.net_aep 规范单位即 MWh，显式声明单位，不再靠 *1e3 猜测
+    baseline_aep=result.net_aep,
+    baseline_aep_unit="MWh",
     save_path="test_output/convergence.png",
     show=False,
 )
